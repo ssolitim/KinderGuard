@@ -29,7 +29,9 @@ person_tracking = {}
 MAX_LOST_FRAMES = 10
 
 #영상 파일 경로
-source = "어린이 보호구역 내 도로보행 위험행동 영상/Training/driveway_walk/[원천]clip_driveway_walk_2/2020_12_02_10_16_driveway_walk_sun_B_04.mp4"
+#source = "어린이 보호구역 내 도로보행 위험행동 영상/Training/cctv/driveway_walk/[원천]clip_driveway_walk_4_8/2020_11_16_12_31_driveway_walk_sun_A_5.mp4"
+#source = "어린이 보호구역 내 도로보행 위험행동 영상/Training/cctv/driveway_walk/[원천]clip_driveway_walk_2/2020_12_02_10_16_driveway_walk_sun_B_04.mp4"
+source = "어린이 보호구역 내 도로보행 위험행동 영상/새 폴더/20250314_094123.mp4"
 dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
 
 #멀티프로세싱
@@ -39,31 +41,110 @@ result_queue = mp.Queue(maxsize=10)
 BATCH_SIZE = 4  #배치 사이즈 설정
 
 def classify_person(candidate, bbox_height):
-    """ 신체 비율을 기반으로 어른/어린이를 분류 """
+    """ 신체 비율을 기반으로 어른/어린이를 분류 - Unknown 결과 최소화 """
     try:
-        head = candidate[0][:2]
-        shoulder = (candidate[2][:2] + candidate[5][:2]) / 2
-        hip = (candidate[8][:2] + candidate[11][:2]) / 2
-        ankle = (candidate[10][:2] + candidate[13][:2]) / 2
+        # 필요한 키포인트 추출
+        head = candidate[0][:2]  # 코(nose)
         
-        height = np.linalg.norm(head - ankle)
-        head_size = np.linalg.norm(head - shoulder)
-        leg_length = np.linalg.norm(hip - ankle)
-
-        R_head = head_size / bbox_height
-        R_leg = leg_length / bbox_height
-
-        if R_head < 0.10 or R_leg < 0.10:
-            return "Unknown"
-        if R_head > 0.30 or R_leg < 0.35:
-            return "Child"
-        elif R_head < 0.20 or R_leg > 0.42:
-            return "Adult"
+        # 최소한의 필수 키포인트 확인 (목, 어깨, 골반, 발목)
+        # OpenPose 키포인트 인덱스: 1=목, 2/5=어깨, 8/11=골반, 10/13=발목
+        essential_points = [1, 2, 5, 8, 11, 10, 13]
+        valid_points = sum(1 for i in essential_points if not np.isnan(candidate[i][0]))
+        
+        # 목 키포인트가 있으면 사용, 없으면 어깨 중간점 위쪽으로 추정
+        if not np.isnan(candidate[1][0]).any():
+            neck = candidate[1][:2]
+        elif not np.isnan(candidate[2][0]).any() and not np.isnan(candidate[5][0]).any():
+            # 어깨 중간점 위로 목 위치 추정
+            r_shoulder = candidate[2][:2]
+            l_shoulder = candidate[5][:2]
+            shoulder_mid = (r_shoulder + l_shoulder) / 2
+            # 목은 어깨 중간에서 조금 위쪽으로 추정
+            neck = shoulder_mid - np.array([0, 0.05 * bbox_height])
         else:
-            return "Uncertain"
-    except:
-        return "Unknown"
+            return "Unknown"
+        
+        # 어깨 중심점 계산 (한쪽이라도 있으면 사용)
+        if not np.isnan(candidate[2][0]).any() and not np.isnan(candidate[5][0]).any():
+            r_shoulder = candidate[2][:2]
+            l_shoulder = candidate[5][:2]
+            shoulder = (r_shoulder + l_shoulder) / 2
+        elif not np.isnan(candidate[2][0]).any():
+            shoulder = candidate[2][:2]
+        elif not np.isnan(candidate[5][0]).any():
+            shoulder = candidate[5][:2]
+        else:
+            return "Unknown"
+        
+        # 골반 중심점 계산 (한쪽이라도 있으면 사용)
+        if not np.isnan(candidate[8][0]).any() and not np.isnan(candidate[11][0]).any():
+            r_hip = candidate[8][:2]
+            l_hip = candidate[11][:2]
+            hip = (r_hip + l_hip) / 2
+        elif not np.isnan(candidate[8][0]).any():
+            hip = candidate[8][:2]
+        elif not np.isnan(candidate[11][0]).any():
+            hip = candidate[11][:2]
+        else:
+            return "Unknown"
+                
+        # 발목 중심점 계산 (한쪽이라도 있으면 사용)
+        if not np.isnan(candidate[10][0]).any() and not np.isnan(candidate[13][0]).any():
+            r_ankle = candidate[10][:2]
+            l_ankle = candidate[13][:2]
+            ankle = (r_ankle + l_ankle) / 2
+        elif not np.isnan(candidate[10][0]).any():
+            ankle = candidate[10][:2]
+        elif not np.isnan(candidate[13][0]).any():
+            ankle = candidate[13][:2]
+        else:
+            return "Unknown"
+        
+        # 총 신체 높이 측정
+        total_height = np.linalg.norm(head - ankle)
+        
+        # 주요 비율 계산
+        head_size = np.linalg.norm(head - neck)
+        torso_length = np.linalg.norm(shoulder - hip)
+        leg_length = np.linalg.norm(hip - ankle)
+        
+        # 신체 비율 계산
+        head_to_height_ratio = head_size / total_height
+        leg_to_height_ratio = leg_length / total_height
+        with open("ratios_log.txt", "a") as log_file:
+            log_file.write(f"head_to_height_ratio: {head_to_height_ratio:.4f} | leg_to_height_ratio: {leg_to_height_ratio:.4f}\n")
 
+        
+        # 최소 유효 키포인트가 3개 이상이면 판별 시도
+        if valid_points >= 3:
+            print("head_to_height_ratio : ", head_to_height_ratio)
+            print("leg_to_height_ratio", leg_to_height_ratio)
+            # 분류 기준 (거리 고려하여 조정)
+            # if head_to_height_ratio > 0.3:
+            #     return "Unknown"
+            # elif leg_to_height_ratio > 0.6:
+            #     return "Unknown"
+            if head_to_height_ratio > 0.21:
+                print("child")
+                return "Child"
+            elif leg_to_height_ratio > 0.43:
+                print("adult")
+                return "Adult"
+            elif head_to_height_ratio > 0.14:
+                print("child")
+                return "Child"
+            elif head_to_height_ratio < 0.13:
+                print("adult")
+                return "Adult"
+            else:
+                # 기본값을 알수없음으로 설정
+                return "Unknown"
+        else:
+            # 기본값을 알수없음으로 설정
+            return "Unknown"
+    except Exception as e:
+        return "Unknown"
+    
 @smart_inference_mode()
 def yolo_detect(frame_queue, result_queue):
     batch_imgs = []
@@ -109,6 +190,14 @@ def openpose_detect(result_queue):
         updated_tracking = {}
 
         for frame, boxes in batch_results:
+            height, width, _ = frame.shape
+            GREEN_LINE_X = width // 2 + 200
+            ORANGE_LINE_X = width // 2 + 100
+            RED_LINE_X = width // 2
+            GREEN_LINE_Y = height // 2 + 100
+            ORANGE_LINE_Y = height // 2 + 175
+            RED_LINE_Y = height // 2 + 250
+            
             for x1, y1, x2, y2, bbox_height in boxes:
                 person_crop = frame[y1:y2, x1:x2].copy()
 
@@ -126,13 +215,29 @@ def openpose_detect(result_queue):
 
                     #신체 비율 기반으로 분류
                     classification = classify_person(candidate, bbox_height)
+                    
+                    # 감지 및 로그 출력 세로
+                    if classification == "Child" and RED_LINE_X >= x1:
+                        print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                    elif classification == "Child" and ORANGE_LINE_X >= x1:
+                        print(f"ORANGE 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                    elif classification == "Child" and GREEN_LINE_X >= x1:
+                        print(f"GREEN 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                            
+                    # # 감지 및 로그 출력 가로
+                    # if classification == "Child" and RED_LINE_Y <= y1:
+                    #     print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                    # elif classification == "Child" and ORANGE_LINE_Y <= y1:
+                    #     print(f"ORANGE 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                    # elif classification == "Child" and GREEN_LINE_Y <= y1:
+                    #     print(f"GREEN 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
 
-                    #"Child" 또는 "Adult"가 아닐 경우, 이전 값 유지
-                    if classification not in ["Child", "Adult"]:
-                        classification = person_tracking.get((x1, y1, x2, y2), {}).get('label', "Unknown")
-
-                    #현재 프레임에서 확인된 객체 저장
-                    updated_tracking[(x1, y1, x2, y2)] = {'label': classification, 'lost_frames': 0}
+                    # 현재 프레임에서 확인된 객체 저장
+                    updated_tracking[(x1, y1, x2, y2)] = {
+                        "label": classification,
+                        "lost_frames": 0,
+                        "x1": x1  # 현재 x 좌표 저장
+                    }
 
                     #객체 ID 기반으로 라벨 표시
                     color = (0, 255, 255) if classification == "Child" else (255, 0, 0)
@@ -142,6 +247,16 @@ def openpose_detect(result_queue):
 
                     #바운딩 박스 그리기
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    
+            # 영상 중간 왼쪽에 빨간 세로 선 추가
+            cv2.line(frame, (GREEN_LINE_X, 0), (GREEN_LINE_X, height), (22, 219, 29), 2)  # 빨간색 두께 2의 직선
+            cv2.line(frame, (ORANGE_LINE_X, 0), (ORANGE_LINE_X, height), (0, 94, 255), 2)  # 빨간색 두께 2의 직선
+            cv2.line(frame, (RED_LINE_X, 0), (RED_LINE_X, height), (0, 0, 255), 2)  # 빨간색 두께 2의 직선
+            
+            # #영상 중간 아래에 빨간 가로 선 추가
+            # cv2.line(frame, (0, GREEN_LINE_Y), (width, GREEN_LINE_Y), (22, 219, 29), 2)  # 빨간색 두께 2의 직선
+            # cv2.line(frame, (0, ORANGE_LINE_Y), (width, ORANGE_LINE_Y), (0, 94, 255), 2)  # 빨간색 두께 2의 직선
+            # cv2.line(frame, (0, RED_LINE_Y), (width, RED_LINE_Y), (0, 0, 255), 2)  # 빨간색 두께 2의 직선
 
         #기존에 추적 중이던 객체 중 감지되지 않은 객체 처리
         for key, value in person_tracking.items():
@@ -152,11 +267,11 @@ def openpose_detect(result_queue):
 
         #업데이트된 객체 정보 유지
         person_tracking = updated_tracking
-        
+                
         cv2.namedWindow("YOLOv9 + OpenPose", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("YOLOv9 + OpenPose", 1280, 720)  #원하는 크기로 창 크기 지정
         cv2.imshow("YOLOv9 + OpenPose", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(100) & 0xFF == ord('q'): #waitKey(n) 프레임 조절 100 = 10프레임
             break
 
     cv2.destroyAllWindows()
