@@ -242,7 +242,8 @@ def openpose_detect(result_queue):
                         if is_recording and record_black_time is None:
                             record_black_time = current_time
                             os.makedirs("captures", exist_ok=True)  # 폴더 없으면 생성
-                            image_filename = os.path.join("captures", f"capture_{int(time.time())}.jpg")    # captures/파일명 이미지 캡처
+                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
+                            image_filename = os.path.join("captures", f"capture_{timestamp}.jpg")    # captures/파일명 이미지 캡처
                             cv2.imwrite(image_filename, frame)
                             print(f"이미지 저장됨: {image_filename}")
                     elif classification == "Child" and RED_LINE_X >= x1:
@@ -252,7 +253,8 @@ def openpose_detect(result_queue):
                         if not is_recording:
                             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                             os.makedirs("videos", exist_ok=True)    # 폴더 없으면 생성
-                            video_filename = os.path.join("videos", f"record_{int(time.time())}.mp4")   # videos/파일명 동영상 녹화
+                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
+                            video_filename = os.path.join("videos", f"record_{timestamp}.mp4")   # videos/파일명 동영상 녹화
                             video_writer = cv2.VideoWriter(video_filename, fourcc, 10.0, (frame.shape[1], frame.shape[0]))
                             is_recording = True
                             record_black_time = None
