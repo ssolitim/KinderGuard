@@ -12,6 +12,7 @@ from utils.dataloaders import LoadImages
 from src.body import Body
 from src import util
 from collections import defaultdict
+import requests
 
 #장치 선택
 device = select_device('0' if torch.cuda.is_available() else 'cpu')
@@ -276,42 +277,20 @@ def openpose_detect(result_queue):
 
     cv2.destroyAllWindows()
 
+
 # BackEnd 관련 코드
-import os
-from flask import Flask
-from datetime import datetime
-from backend.config import SQLALCHEMY_DATABASE_URI, SQLALCHEMY_TRACK_MODIFICATIONS
-from backend.database import db
-from backend.dbmodels import Record
+url = "http://http://13.209.121.22:8080/record/upload"
+# 업로드할 파일 (로컬 파일 경로 사용)
+files = [
+    ('uploadFiles', ('image.jpg', open('path/to/image.jpg', 'rb'), 'image/jpeg')),
+    ('uploadFiles', ('video.mp4', open('path/to/video.mp4', 'rb'), 'video/mp4'))
+]
+# 요청 보내기
+response = requests.post(url, files=files)
+# 응답 확인
+print(response.status_code)
+print(response.text)
 
-remote_server = "ubuntu@13.209.121.22"
-pem_key = "backend/ssolitim.pem"
-port = 22222
-remote_image_path = "/home/ubuntu/detect/images/"
-remote_video_path = "/home/ubuntu/detect/videos/"
-
-image_file = "static/images/2025-03-27.jpg" # 이미지 파일 예시
-video_file = "static/videos/2025-03-27.mp4" # 비디오 파일 예시
-
-# 캡쳐된 이미지와 비디오 파일을 서버로 전송하는 명령어 사용.
-os.system(f"scp -i {pem_key} -P {port} {image_file} {remote_server}:{remote_image_path}")
-os.system(f"scp -i {pem_key} -P {port} {video_file} {remote_server}:{remote_video_path}")
-
-app = Flask(__name__)
-
-# Flask에 DB 설정 적용
-app.config["SQLALCHEMY_DATABASE_URI"] = SQLALCHEMY_DATABASE_URI
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = SQLALCHEMY_TRACK_MODIFICATIONS
-
-# SQLAlchemy 초기화
-db.init_app(app)
-
-def insert_record(image_path, video_path):
-    with app.app_context():
-        new_record = Record(image_path=image_path, video_path=video_path)
-        db.session.add(new_record)
-        db.session.commit()
-        print(f"Record inserted successfully! Image Path: {image_path}, Video Path: {video_path}")
 
 if __name__ == "__main__":
     if mp.get_start_method(allow_none=True) != 'spawn':
