@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import multiprocessing as mp
 import time
+import os
+import requests
 from queue import Empty
 from pathlib import Path
 from models.common import DetectMultiBackend
@@ -11,8 +13,7 @@ from utils.torch_utils import select_device, smart_inference_mode
 from utils.dataloaders import LoadImages
 from src.body import Body
 from src import util
-from collections import defaultdict
-import requests
+
 
 #장치 선택
 device = select_device('0' if torch.cuda.is_available() else 'cpu')
@@ -118,8 +119,8 @@ def classify_person(candidate, bbox_height):
         
         # 최소 유효 키포인트가 3개 이상이면 판별 시도
         if valid_points >= 3:
-            print("head_to_height_ratio : ", head_to_height_ratio)
-            print("leg_to_height_ratio", leg_to_height_ratio)
+            #print("head_to_height_ratio : ", head_to_height_ratio)
+            #print("leg_to_height_ratio", leg_to_height_ratio)
             # 분류 기준 (거리 고려하여 조정)
             # if head_to_height_ratio > 0.3:
             #     return "Unknown"
@@ -182,6 +183,12 @@ def yolo_detect(frame_queue, result_queue):
 def openpose_detect(result_queue):
     global person_tracking
     
+    child_count = 0
+    adult_count = 0
+    is_recording = False
+    video_writer = None
+    record_black_time = None
+    
     while True:
         try:
             batch_results = result_queue.get(timeout=2)
@@ -192,18 +199,25 @@ def openpose_detect(result_queue):
 
         for frame, boxes in batch_results:
             height, width, _ = frame.shape
-            GREEN_LINE_X = width // 2 + 200
-            ORANGE_LINE_X = width // 2 + 100
-            RED_LINE_X = width // 2
+            GREEN_LINE_X = width // 2 + 300
+            ORANGE_LINE_X = width // 2 + 200
+            RED_LINE_X = width // 2 + 100
+            BLACK_LINE_X = width // 2
             GREEN_LINE_Y = height // 2 + 100
             ORANGE_LINE_Y = height // 2 + 175
             RED_LINE_Y = height // 2 + 250
-            
+            BLACK_LINE_Y = height // 2 + 325
+            current_time = time.time()
+
             for x1, y1, x2, y2, bbox_height in boxes:
                 person_crop = frame[y1:y2, x1:x2].copy()
 
                 if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-                    torch.cuda.empty_cache()
+                    # GPU 메모리 사용량 기준으로 캐시 정리
+                    gpu_mem_used = torch.cuda.memory_allocated() / 1024**2  # MB 단위
+                    if gpu_mem_used > 2000:
+                        torch.cuda.empty_cache()
+                        
                     candidate, subset = body_estimation(person_crop)
 
                     #Keypoints 좌표 변환 (바운딩 박스 기준으로 맞춤)
@@ -216,15 +230,57 @@ def openpose_detect(result_queue):
 
                     #신체 비율 기반으로 분류
                     classification = classify_person(candidate, bbox_height)
+                    if classification == "Child":
+                        child_count += 1
+                    elif classification == "Adult":
+                        adult_count += 1
+                    #print("Child : ", child_count, "Adult : ", adult_count)
                     
                     # 감지 및 로그 출력 세로
-                    if classification == "Child" and RED_LINE_X >= x1:
+                    if classification == "Child" and BLACK_LINE_X >= x1:
+                        print(f"BLACK 경고 - 어린이가 이탈했습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                        if is_recording and record_black_time is None:
+                            record_black_time = current_time
+                            os.makedirs("captures", exist_ok=True)  # 폴더 없으면 생성
+                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
+                            image_filename = os.path.join("captures", f"capture_{timestamp}.jpg")    # captures/파일명 이미지 캡처
+                            cv2.imwrite(image_filename, frame)
+                            print(f"이미지 저장됨: {image_filename}")
+                    elif classification == "Child" and RED_LINE_X >= x1:
                         print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
                     elif classification == "Child" and ORANGE_LINE_X >= x1:
                         print(f"ORANGE 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
+                        if not is_recording:
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            os.makedirs("videos", exist_ok=True)    # 폴더 없으면 생성
+                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
+                            video_filename = os.path.join("videos", f"record_{timestamp}.mp4")   # videos/파일명 동영상 녹화
+                            video_writer = cv2.VideoWriter(video_filename, fourcc, 10.0, (frame.shape[1], frame.shape[0]))
+                            is_recording = True
+                            record_black_time = None
+                            print("녹화 시작!")
                     elif classification == "Child" and GREEN_LINE_X >= x1:
                         print(f"GREEN 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
-                            
+                        if is_recording:
+                            print(f"GREEN 복귀 - 녹화 중지 및 영상 삭제")
+                            if video_writer is not None:
+                                video_writer.release()
+                            is_recording = False
+                            video_writer = None
+                            # 파일 삭제 시도
+                            if video_filename and os.path.exists(video_filename):
+                                os.remove(video_filename)
+                                print(f"{video_filename} 삭제 완료")
+                            video_filename = None
+                        
+                    # 10초간 녹화 후 종료 (Yolo와 OpenPose 사용으로 프레임이 녹화하는 프레임과 달라 정확한 시간을 측정하기 어려움)
+                    if is_recording and record_black_time is not None:
+                        if current_time - record_black_time > 10:
+                            video_writer.release()
+                            print("녹화 종료!")
+                            is_recording = False
+                            video_writer = None
+                            record_black_time = None
                     # # 감지 및 로그 출력 가로
                     # if classification == "Child" and RED_LINE_Y <= y1:
                     #     print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
@@ -232,13 +288,6 @@ def openpose_detect(result_queue):
                     #     print(f"ORANGE 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
                     # elif classification == "Child" and GREEN_LINE_Y <= y1:
                     #     print(f"GREEN 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
-
-                    # 현재 프레임에서 확인된 객체 저장
-                    updated_tracking[(x1, y1, x2, y2)] = {
-                        "label": classification,
-                        "lost_frames": 0,
-                        "x1": x1  # 현재 x 좌표 저장
-                    }
 
                     #객체 ID 기반으로 라벨 표시
                     color = (0, 255, 255) if classification == "Child" else (255, 0, 0)
@@ -250,21 +299,19 @@ def openpose_detect(result_queue):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     
             # 영상 중간 왼쪽에 빨간 세로 선 추가
-            cv2.line(frame, (GREEN_LINE_X, 0), (GREEN_LINE_X, height), (22, 219, 29), 2)  # 빨간색 두께 2의 직선
-            cv2.line(frame, (ORANGE_LINE_X, 0), (ORANGE_LINE_X, height), (0, 94, 255), 2)  # 빨간색 두께 2의 직선
+            cv2.line(frame, (GREEN_LINE_X, 0), (GREEN_LINE_X, height), (22, 219, 29), 2)  # 연두색 두께 2의 직선
+            cv2.line(frame, (ORANGE_LINE_X, 0), (ORANGE_LINE_X, height), (0, 94, 255), 2)  # 주황색 두께 2의 직선
             cv2.line(frame, (RED_LINE_X, 0), (RED_LINE_X, height), (0, 0, 255), 2)  # 빨간색 두께 2의 직선
+            cv2.line(frame, (BLACK_LINE_X, 0), (BLACK_LINE_X, height), (0, 0, 0), 2)  # 검은색 두께 2의 직선
             
             # #영상 중간 아래에 빨간 가로 선 추가
             # cv2.line(frame, (0, GREEN_LINE_Y), (width, GREEN_LINE_Y), (22, 219, 29), 2)  # 빨간색 두께 2의 직선
             # cv2.line(frame, (0, ORANGE_LINE_Y), (width, ORANGE_LINE_Y), (0, 94, 255), 2)  # 빨간색 두께 2의 직선
             # cv2.line(frame, (0, RED_LINE_Y), (width, RED_LINE_Y), (0, 0, 255), 2)  # 빨간색 두께 2의 직선
 
-        #기존에 추적 중이던 객체 중 감지되지 않은 객체 처리
-        for key, value in person_tracking.items():
-            if key not in updated_tracking:
-                value['lost_frames'] += 1
-                if value['lost_frames'] < MAX_LOST_FRAMES:  #일정 시간 동안 유지
-                    updated_tracking[key] = value
+        # 녹화 중이면 프레임 저장
+        if is_recording and video_writer is not None:
+            video_writer.write(frame)
 
         #업데이트된 객체 정보 유지
         person_tracking = updated_tracking
@@ -272,11 +319,10 @@ def openpose_detect(result_queue):
         cv2.namedWindow("YOLOv9 + OpenPose", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("YOLOv9 + OpenPose", 1280, 720)  #원하는 크기로 창 크기 지정
         cv2.imshow("YOLOv9 + OpenPose", frame)
-        if cv2.waitKey(100) & 0xFF == ord('q'): #waitKey(n) 프레임 조절 100 = 10프레임
+        if cv2.waitKey(1) & 0xFF == ord('q'): #waitKey(n) 프레임 조절 100 = 10프레임
             break
 
     cv2.destroyAllWindows()
-
 
 # BackEnd 관련 코드
 url = "http://13.209.121.22:8080/record/upload"
@@ -291,7 +337,6 @@ response = requests.post(url, files=files)
 # 응답 확인
 print(response.status_code)
 print(response.text)
-
 
 if __name__ == "__main__":
     if mp.get_start_method(allow_none=True) != 'spawn':
