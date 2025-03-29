@@ -27,9 +27,6 @@ imgsz = check_img_size((320, 320), s=stride)
 #Openpose 모델 불러오기
 body_estimation = Body('model/body_pose_model.pth')
 
-person_tracking = {}
-MAX_LOST_FRAMES = 10
-
 #영상 파일 경로
 #source = "어린이 보호구역 내 도로보행 위험행동 영상/Training/cctv/driveway_walk/[원천]clip_driveway_walk_4_8/2020_11_16_12_31_driveway_walk_sun_A_5.mp4"
 #source = "어린이 보호구역 내 도로보행 위험행동 영상/Training/cctv/driveway_walk/[원천]clip_driveway_walk_2/2020_12_02_10_16_driveway_walk_sun_B_04.mp4"
@@ -107,7 +104,6 @@ def classify_person(candidate, bbox_height):
         
         # 주요 비율 계산
         head_size = np.linalg.norm(head - neck)
-        torso_length = np.linalg.norm(shoulder - hip)
         leg_length = np.linalg.norm(hip - ankle)
         
         # 신체 비율 계산
@@ -127,16 +123,12 @@ def classify_person(candidate, bbox_height):
             # elif leg_to_height_ratio > 0.6:
             #     return "Unknown"
             if head_to_height_ratio > 0.21:
-                print("child")
                 return "Child"
             elif leg_to_height_ratio > 0.43:
-                print("adult")
                 return "Adult"
             elif head_to_height_ratio > 0.14:
-                print("child")
                 return "Child"
             elif head_to_height_ratio < 0.13:
-                print("adult")
                 return "Adult"
             else:
                 # 기본값을 알수없음으로 설정
@@ -180,9 +172,7 @@ def yolo_detect(frame_queue, result_queue):
             batch_imgs.clear()
             batch_im0s.clear()
 
-def openpose_detect(result_queue):
-    global person_tracking
-    
+def openpose_detect(result_queue):    
     child_count = 0
     adult_count = 0
     is_recording = False
@@ -194,8 +184,6 @@ def openpose_detect(result_queue):
             batch_results = result_queue.get(timeout=2)
         except Empty:
             continue
-        
-        updated_tracking = {}
 
         for frame, boxes in batch_results:
             height, width, _ = frame.shape
@@ -242,23 +230,25 @@ def openpose_detect(result_queue):
                         if is_recording and record_black_time is None:
                             record_black_time = current_time
                             os.makedirs("captures", exist_ok=True)  # 폴더 없으면 생성
-                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
-                            image_filename = os.path.join("captures", f"capture_{timestamp}.jpg")    # captures/파일명 이미지 캡처
+                            image_filename = os.path.join("captures", f"image.jpg")    # captures/파일명 이미지 캡처
                             cv2.imwrite(image_filename, frame)
                             print(f"이미지 저장됨: {image_filename}")
+                            upload_to_backend(image_filename, "image/jpeg")
+                            os.remove(image_filename)
+                            print(f"{image_filename} 삭제 완료")
+                            image_filename = None
                     elif classification == "Child" and RED_LINE_X >= x1:
                         print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
                     elif classification == "Child" and ORANGE_LINE_X >= x1:
                         print(f"ORANGE 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
                         if not is_recording:
                             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                            os.makedirs("videos", exist_ok=True)    # 폴더 없으면 생성
-                            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
-                            video_filename = os.path.join("videos", f"record_{timestamp}.mp4")   # videos/파일명 동영상 녹화
+                            os.makedirs("captures", exist_ok=True)    # 폴더 없으면 생성
+                            video_filename = os.path.join("captures", f"video.mp4")   # videos/파일명 동영상 녹화
                             video_writer = cv2.VideoWriter(video_filename, fourcc, 10.0, (frame.shape[1], frame.shape[0]))
                             is_recording = True
                             record_black_time = None
-                            print("녹화 시작!")
+                            print("녹화 시작")
                     elif classification == "Child" and GREEN_LINE_X >= x1:
                         print(f"GREEN 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
                         if is_recording:
@@ -277,10 +267,17 @@ def openpose_detect(result_queue):
                     if is_recording and record_black_time is not None:
                         if current_time - record_black_time > 10:
                             video_writer.release()
-                            print("녹화 종료!")
+                            print("녹화 종료")
                             is_recording = False
                             video_writer = None
                             record_black_time = None
+                            if video_filename:
+                                upload_to_backend(video_filename, "video/mp4")
+                                print("동영상 전송 완료")
+                                os.remove(video_filename)
+                                print(f"{video_filename} 삭제 완료")
+                                video_filename = None
+                                
                     # # 감지 및 로그 출력 가로
                     # if classification == "Child" and RED_LINE_Y <= y1:
                     #     print(f"RED 경고 - 어린이가 감지되었습니다 좌표(bbox)=({x1}, {y1}, {x2}, {y2})")
@@ -312,9 +309,6 @@ def openpose_detect(result_queue):
         # 녹화 중이면 프레임 저장
         if is_recording and video_writer is not None:
             video_writer.write(frame)
-
-        #업데이트된 객체 정보 유지
-        person_tracking = updated_tracking
                 
         cv2.namedWindow("YOLOv9 + OpenPose", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("YOLOv9 + OpenPose", 1280, 720)  #원하는 크기로 창 크기 지정
@@ -324,19 +318,24 @@ def openpose_detect(result_queue):
 
     cv2.destroyAllWindows()
 
-# BackEnd 관련 코드
-url = "http://13.209.121.22:8080/record/upload"
-# 업로드할 파일
-# ('필드 이름', ('파일 이름', 파일 객체, 'MIME 타입'))
-files = [
-    ('uploadFiles', ('image.jpg', open('path/to/image.jpg', 'rb'), 'image/jpeg')),
-    ('uploadFiles', ('video.mp4', open('path/to/video.mp4', 'rb'), 'video/mp4'))
-]
-# 요청 보내기
-response = requests.post(url, files=files)
-# 응답 확인
-print(response.status_code)
-print(response.text)
+def upload_to_backend(file_path, mime_type):
+    # BackEnd 관련 코드
+    url = "http://13.209.121.22:8080/record/upload"
+    try:
+        with open(file_path, 'rb') as f:
+            # 업로드할 파일 (로컬 파일 경로 사용)
+            files = {
+                'uploadFiles': (os.path.basename(file_path), f, mime_type)
+            }
+            response = requests.post(url, files=files)
+            # 응답 확인
+            print(response.status_code)
+            print(response.text)
+            print(f"업로드 응답: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"업로드 실패: {e}")
+
+
 
 if __name__ == "__main__":
     if mp.get_start_method(allow_none=True) != 'spawn':
