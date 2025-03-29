@@ -279,8 +279,9 @@ def openpose_detect(result_queue):
 
 
 # BackEnd 관련 코드
-url = "http://http://13.209.121.22:8080/record/upload"
-# 업로드할 파일 (로컬 파일 경로 사용)
+url = "http://13.209.121.22:8080/record/upload"
+# 업로드할 파일
+# ('필드 이름', ('파일 이름', 파일 객체, 'MIME 타입'))
 files = [
     ('uploadFiles', ('image.jpg', open('path/to/image.jpg', 'rb'), 'image/jpeg')),
     ('uploadFiles', ('video.mp4', open('path/to/video.mp4', 'rb'), 'video/mp4'))
