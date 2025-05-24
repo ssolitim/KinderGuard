@@ -14,6 +14,11 @@ from utils.dataloaders import LoadImages
 from src.body import Body
 from src import util
 
+# 텍스트 음성 출력 관련 모듈
+import pymysql
+from gtts import gTTS
+from playsound import playsound
+
 
 #장치 선택
 device = select_device('0' if torch.cuda.is_available() else 'cpu')
@@ -335,7 +340,36 @@ def upload_to_backend(file_path, mime_type):
     except Exception as e:
         print(f"업로드 실패: {e}")
 
+def play_checked_voice():
+    # DB 연결
+    conn = pymysql.connect(
+        host='13.209.121.22',
+        user='root',
+        password='ssolitim0925',
+        db='ssolitim'
+    )
+    cursor = conn.cursor()
 
+    # 쿼리 실행
+    cursor.execute("SELECT content FROM voice WHERE is_checked = 1")
+    row = cursor.fetchone()
+
+    # 결과 처리
+    voice_text = "위험하니까 나가면 안돼"
+    if row:
+        voice_text = row[0]
+        print("Content:", voice_text)
+    else:
+        print("조건에 맞는 레코드가 없습니다.")
+
+    # TTS 생성 및 재생
+    tts = gTTS(text=voice_text, lang='ko')
+    tts.save("output.mp3")
+    playsound("output.mp3")
+    os.remove("output.mp3")
+
+    # 연결 종료
+    conn.close()
 
 if __name__ == "__main__":
     if mp.get_start_method(allow_none=True) != 'spawn':
